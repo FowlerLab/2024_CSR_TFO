@@ -1,0 +1,876 @@
+---
+title: "Barcode subassembly analysis"
+author: "Nick Popp"
+date: "03.01.2023"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(readr.show_col_types = FALSE)
+```
+
+```{r libraries_functions}
+
+## knitr for making files
+if (!require(knitr)) install.packages('knitr')
+library(knitr)
+
+## tidyverse for ggplot, dplyr, data manipulation
+if (!require(tidyverse)) install.packages('tidyverse')
+library(tidyverse)
+
+## scales 1.0.0 for scientific notation
+if (!require(scales)) install.packages('scales')
+library(scales)
+
+## paletteer 1.2.0 for color palettes
+if (!require(paletteer)) install.packages('paletteer')
+library(paletteer)
+
+## here 1.2.0 for directory management
+if (!require(here)) install.packages('here')
+library(here)
+
+## broom 1.2.0 for tidy fitting
+if (!require(broom)) install.packages('broom')
+library(broom)
+
+## furrr for parallelizing
+if (!require(furrr)) install.packages('furrr')
+library(furrr)
+
+## hash for creating hash table
+if (!require(hash)) install.packages('hash')
+library(hash)
+
+###############################################################################
+
+## make sure working directories are correct
+i_am("221224_TFO_pacbio_subassembly.Rmd")
+
+###############################################################################
+
+## set seed for reproducible plots
+set.seed(627)
+
+## set up ggplot to look pretty
+ggplot <- function(...) {
+  ggplot2::ggplot(...) + 
+    ## white background with black border
+    theme(panel.background = element_rect(fill = "white", 
+                                          colour = "black"),
+          ## hide gridlines
+          panel.grid.major = element_line(color = "grey80"),
+          panel.grid.minor = element_blank(),
+          ## change legend position
+          legend.position = "right",
+          legend.justification = "center",
+          legend.key = element_rect(fill = "white", size = 0.7),
+          ## change text
+          axis.title = element_text(size = 15, color = "black"),
+          axis.text = element_text(size = 13, color = "black"),
+          legend.text = element_text(size = 13, color = "black"),
+          legend.title = element_text(size = 15, color = "black"))
+}
+
+###############################################################################
+
+## function to read out all matching files in subdirectories
+## input is a list of files with full names
+## which comes from the here() function in the here package
+read_txt_path <- function(path){
+  
+  ## read in txt file
+  read_table(path, col_names = c("barcode", "sequence")) %>%
+    ## create path name variable
+    mutate(source = path,
+           ## remove long prefix
+           source = gsub(pattern = paste0(here("inputs"), "/"),
+                         replacement = "",
+                         x = source))
+}
+
+###############################################################################
+
+## function to compare DNA and protein strings for finding mutations
+    ## parameters
+        ## nt1 = WT sequence (as nucleotides)
+        ## nt2 = Pacbio sequence (as nucleotides)
+    ## outputs a two column named list
+        ## column 1: different amino acids and position
+        ## column 2: different nucleotides and position
+mutation_caller <- function(nt1, nt2) {
+  
+  ## create temp length count
+  temp_length <- str_length(nt1) - str_length(nt2)
+
+  ## count insertions
+  if (temp_length < 0) {
+    
+    ## take absolute value of length to prevent negative numbers in table
+    temp_length <- abs(temp_length)
+    
+    ## output insertions with nt length
+    diff_aa <- paste0("insertion: length ", temp_length, " nt")
+    diff_nt <- paste0("insertion: length ", temp_length, " nt")
+    
+  ## count deletions, not including 3 nt deletions
+  } else if (temp_length > 0 & temp_length != 3) {
+    
+    ## output deletions with nt length
+    diff_aa <- paste0("deletion: length ", temp_length, " nt")
+    diff_nt <- paste0("deletion: length ", temp_length, " nt")
+
+  ## correct length and codon deletion analysis
+  } else {
+    
+    ## turn strings into vector of NT
+    nt1vec <- unlist(strsplit(nt1, ""))
+    nt2vec <- unlist(strsplit(nt2, ""))
+  
+    ## combine strings into 3 NT codons
+    nt1codvec <- paste0(nt1vec[c(TRUE, FALSE, FALSE)],
+                        nt1vec[c(FALSE, TRUE, FALSE)],
+                        nt1vec[c(FALSE, FALSE, TRUE)])
+    nt2codvec <- paste0(nt2vec[c(TRUE, FALSE, FALSE)],
+                        nt2vec[c(FALSE, TRUE, FALSE)],
+                        nt2vec[c(FALSE, FALSE, TRUE)])
+    
+    ## convert WT to aa strings
+    aa1vec <- unlist(mget(nt1codvec, hash_codon_table@.xData))
+    aa2vec <- unlist(mget(nt2codvec, hash_codon_table@.xData))
+    
+    ## deletion analysis to find position
+    if (temp_length == 3){
+      
+      ## append NNN to end to create same length vector
+      nt2codvec_temp <- append(nt2codvec, "NNN")
+      
+      ## compare as vector, find first missing position
+      missing_pos <- (1:length(nt1codvec))[nt1codvec != nt2codvec_temp][1]
+      
+      ## add "NNN" at first missing position and re-compare
+      ## append adds after position, so have to subtract 1
+      nt2codvec_NNN <- append(nt2codvec, "NNN", after = missing_pos - 1)
+      
+      ## find new missing first position
+      new_missing_pos <- (1:length(nt1codvec))[nt1codvec != nt2codvec_NNN]
+      
+      ## compare missing positions
+      match_missing <- missing_pos == new_missing_pos
+      
+      ## if codon deletion is in frame, will only be same position and return TRUE
+      ## if FALSE, deletion is out of frame
+      if (match_missing == TRUE) {
+        
+        ## create list of different amino acids, collapse with , separator
+        diff_aa <- paste0(aa1vec[new_missing_pos], new_missing_pos, "del",
+                          collapse = ", ")
+        
+        ## create list of different nucleotides, collapse with , separator
+        diff_nt <- paste0("codon deletion: length ", temp_length, " nt")
+        
+      } else {
+        
+        ## report deletion with nt length
+        diff_aa <- paste0("frameshift deletion: length ", temp_length, " nt")
+        diff_nt <- paste0("frameshift deletion: length ", temp_length, " nt")
+        
+      }
+      
+    } else {
+      
+      ## compare nucleotides and amino acids
+      mut_nt <- (1:length(nt1vec))[nt1vec != nt2vec]
+      mut_aa <- (1:length(aa1vec))[aa1vec != aa2vec]
+  
+      ## if no difference in length of amino acids or nucleotides, label WT
+      if (length(mut_nt) == 0) {
+        
+        ## label as WT
+        diff_aa <- "WT"
+        diff_nt <- "WT"
+    
+      ## else, make list of variants at nucleotide and amino acid level
+      } else {
+      
+        ## divide nt position by 3 to make aa position
+        ## use ceiling to create a round number and prevent dividing errors
+        ceiling_nt <- ceiling(mut_nt / 3)
+
+        ## only retain unique aa position values
+        ceiling_nt <- unique(ceiling_nt)
+
+        ## create list of different amino acids, collapse with , separator
+        diff_aa <- paste0(aa1vec[ceiling_nt], ceiling_nt, aa2vec[ceiling_nt],
+                          collapse = ", ")
+      
+        ## create list of different nucleotides, collapse with , separator
+        diff_nt <- paste0(nt1vec[mut_nt], mut_nt, nt2vec[mut_nt],
+                          collapse = ", ")
+      
+      }
+      
+    }
+    
+  }
+  
+  ## concatenate different nt and aa together
+  diff_all <- c(diff_aa, diff_nt)
+      
+  ## add list names for unnesting later 
+  names(diff_all) <- c("diff_aa", "diff_nt")
+  
+  ## return list
+  return(diff_all)
+  
+}
+
+###############################################################################
+
+## collector's curve function
+collectors_curve <- function(data){
+  
+  ## take input
+  data %>% 
+    ## randomize order of barcodes
+    slice_sample(prop = 1) %>%
+    ## create observation number
+    mutate(obs_num = row_number()) %>%
+    ## arrange barcodes in order and identify the first new barcode for each
+    arrange(barcode, obs_num) %>%
+    group_by(barcode) %>%
+    mutate(dist_num = row_number() == 1) %>%
+    ungroup() %>%
+    ## rearrange by observation
+    arrange(obs_num) %>%
+    ## count distinct barcodes when TRUE (first value only)
+    mutate(uniq_num = cumsum(dist_num)) %>%
+    ## remove unnecessary columns
+    select(obs_num, uniq_num)
+  
+}
+
+###############################################################################
+
+## WT TFO sequence - nucleotide level
+wt_TFO_nt <- toupper("atgaaatcttctcaccatcaccatcaccatgaaaacctgtacttccaatccaatgcaccactggaggaggcgccttggccgccgccggaaggggctttcgtcggctttgtactctcgcgcccggaaccaatgtgggcggagctgaaagctctggcagcctgccgggatggccgtgtgcatcgggcagaagatccattggcgggactgggtgacctcgaggaggtgcgtggcctgctggccaaagatcttgcggtccttgcattgcgggagggtctggatctggctcctggggatgacccgatgctgctggcttatctgctggatccgtcgaataccactccggaaggggtggcacgtcgctacgggggtgaatggactgaagatgccgcccatcgtgcactgctgtcggaacgtctgcatcgtaacctcttgaagcgcctcgagggtgaagagaaactgctttggttatatcacgaagttgaaaaaccgctctctcgtgttctggcgcatatggaagcgaccggggtacgtttagatgttgcgtatttgcaggccctttctctggaacttgcggaagaaatccgccgcctcgaggaagaagtctttcgcttggcgggccacccgttcaacctgaattcccgtgatcagctggaacgggtgctgtttgatgagcttcgtcttccggccttgggaaaaacgcaaaaaactggcaagcgctctaccagtgctgcggtgttagaagccttacgtgaggcgcatccgatcgttgaaaaaattctccagcaccgggagctgacaaaactgaaaaatacctatgtggatccgttaccgagcttagttcacccgcggacgggccgcttgcatacccgcttcaatcaaacggccacggccacgggtcgtctgagtagctcggacccgaatctgcaaaatatcccagtacgcacaccgttgggccagcgcatccgccgtgcttttgttgcagaggctggttgggcgttggtggcgttggattatagccagatcgaattacgcgtcctggcacatttgtcaggagatgaaaacctgattcgggtctttcaggagggtaaggacattcacacccaaaccgcaagctggatgttcggcgtcccgccggaagcggttgatccactgatgcggcgggcagcgaaaacgattaactttggcattgtttatggcatgagtccgtacggtctggcgaaagaactgaaaattggccgccgtgaggcaaaagcgtttatcgaacgctattttgaacgctacccgggtgtgaaacggtatatggaacagattgtggctgaagcccgtgaaaaaggttatgtggagacccttttcggccgccggcgctacgtcccggacctgaatgcccgtgtgaaatcagtacgtgaagcagcggaacgcatggcctttaacatgcctgtgcagggcaccgccgcagacctcatgaaactcgcaatggtgaaattattccctcgcctccgtgagatgggagcccgcatgttactgcaggtacacgatgagctgttactggaggcgccacaagcgcgtgcggaagaagtggcggctttggccaaggaagcgatggaaaaggcctatccgttagccgtgcctctggaggttgaagtgggtatcggggaggactggctttccgccaagggctaa")
+
+## WT TFO sequence - only expected mutated positions
+lib_wt_TFO_nt <- toupper("ccactggaggaggcgccttggccgccgccggaaggggctttcgtcggctttgtactctcgcgcccggaaccaatgtgggcggagctgaaagctctggcagcctgccgggatggccgtgtgcatcgggcagaagatccattggcgggactgggtgacctcgaggaggtgcgtggcctgctggccaaagatcttgcggtccttgcattgcgggagggtctggatctggctcctggggatgacccgatgctgctggcttatctgctggatccgtcgaataccactccggaaggggtggcacgtcgctacgggggtgaatggactgaagatgccgcccatcgtgcactgctgtcggaacgtctgcatcgtaacctcttgaagcgcctcgagggtgaagagaaactgctttggttatatcacgaagttgaaaaaccgctctctcgtgttctggcgcatatggaagcgaccggggtacgtttagatgttgcgtatttgcaggccctttctctggaacttgcggaagaaatccgccgcctcgaggaagaagtctttcgcttggcgggccacccgttcaacctgaattcccgtgatcagctggaacgggtgctgtttgatgagcttcgtcttccggccttgggaaaaacgcaaaaaactggcaagcgctctaccagtgctgcggtgttagaagccttacgtgaggcgcatccgatcgttgaaaaaattctccagcaccgggagctgacaaaactgaaaaatacctatgtggatccgttaccgagcttagttcacccgcggacgggccgcttgcatacccgcttcaatcaaacggccacggccacgggtcgtctgagtagctcggacccgaatctgcaaaatatcccagtacgcacaccgttgggccagcgcatccgccgtgcttttgttgcagaggctggttgggcgttggtggcgttggattatagccagatcgaattacgcgtcctggcacatttgtcaggagatgaaaacctgattcgggtctttcaggagggtaaggacattcacacccaaaccgcaagctggatgttcggcgtcccgccggaagcggttgatccactgatgcggcgggcagcgaaaacgattaactttggcattgtttatggcatgagtccgtacggtctggcgaaagaactgaaaattggccgccgtgaggcaaaagcgtttatcgaacgctattttgaacgctacccgggtgtgaaacggtatatggaacagattgtggctgaagcccgtgaaaaaggttatgtggagacccttttcggccgccggcgctacgtcccggacctgaatgcccgtgtgaaatcagtacgtgaagcagcggaacgcatggcctttaacatgcctgtgcagggcaccgccgcagacctcatgaaactcgcaatggtgaaattattccctcgcctccgtgagatgggagcccgcatgttactgcaggtacacgatgagctgttactggaggcgccacaagcgcgtgcggaagaagtggcggctttggccaaggaagcgatggaaaaggcctatccgttagccgtgcctctggaggttgaagtgggtatcggggaggactggctttccgccaagggctaa")
+
+## import codon table
+codon_table <- read_csv(here("inputs", "codon_table", "codon_table.csv"))
+
+## convert codon table to hash table
+hash_codon_table <- hash(keys = codon_table$codon,
+                         values = codon_table$aa)
+
+```
+
+```{r import_data}
+
+# ## read in Illumina sequencing from 04.20.21
+# illumina_reads <- read_csv(here("inputs", "Illumina", "all_barcoded_tiles.csv"),
+#                            col_names = c("barcode", "reads_mapping",
+#                                          "sample")) %>%
+#   ## select only the samples that are bottlenecked to 30-40x coverage
+#   filter(grepl("125", sample)) %>%
+#   ## change sample to only include library tile name
+#   mutate(sample = word(sample, start = 2L, end = 2L, sep = fixed("_")),
+#          prep = "original")
+# 
+# ## read in Illumina sequencing from 02.23.22
+# illumina_reads_reprep <- read_csv(here("inputs", "Illumina", 
+#                                        "all_NP_barcode_counts.csv"),
+#                                   col_names = c("barcode", "reads_mapping",
+#                                                 "sample")) %>%
+#   ## filter to only original plasmids ("midi", re-sequenced)
+#   filter(grepl("midi", sample)) %>%
+#   ## change sample to only include library tile name
+#   mutate(sample = word(sample, start = 1L, end = 1L, sep = fixed("_")),
+#          prep = "re-sequenced")
+# 
+# ## join together Illumina sequencing runs
+# all_illumina_reads <- rbind(illumina_reads, illumina_reads_reprep)
+# 
+# ## remove original Illumina dataframes
+# rm(illumina_reads, illumina_reads_reprep)
+
+###############################################################################
+
+## import PacBio data from all runs
+all_barcodes <- list.files(path = here("inputs"),
+                           pattern = "*.txt",
+                           recursive = TRUE) %>%
+  map_df(~read_txt_path(here("inputs", .)))
+
+```
+
+```{r call_mutations}
+
+## create table of sequence lengths extracted from PacBio
+length_table <- all_barcodes %>% 
+  ## remove leader sequence and add ATG start codon
+  mutate(sequence = str_sub(sequence, start = 58, end = -1)) %>%
+  ## calculate length difference from WT sample
+  mutate(length = str_length(sequence) - str_length(lib_wt_TFO_nt)) %>%
+  group_by(length, source) %>%
+  summarise(n = n()) %>%
+  ungroup()
+
+###############################################################################
+
+## call mutations
+all_barcodes_mutcalled <- all_barcodes %>%
+  ## remove non-mutated leader sequence and add ATG start codon
+  mutate(sequence = str_sub(sequence, start = 58, end = -1)) %>%
+  ## mutations() requires rowwise(), not sure why
+  rowwise() %>%
+  ## annotate mutations
+  mutate(muts = list(mutation_caller(nt1 = lib_wt_TFO_nt, nt2 = sequence))) %>%
+  ## unlist mutations for aa and nt
+  unnest_wider(col = muts) %>%
+  ## alter stop codon from * to X for easier analysis later
+  mutate(diff_aa = gsub("\\*", "X", diff_aa)) %>%
+  ## remove extraneous columns
+  select(-sequence) %>%
+  ## fill in missing data from individual sources as "not seen"
+  ## e.g. if a barcode is seen in one sample but not in another
+  ## second sample will be filled in as "not seen" instead of NA
+  complete(barcode, source, fill = list(diff_aa = "not seen",
+                                        diff_nt = "not seen")) %>%
+  ## change path name to necessary variable (mapCCS vs. pacrat)
+  mutate(source = case_when(grepl("mapCCS", source) == TRUE ~ "mapCCS",
+                            grepl("pacrat", source) == TRUE ~ "pacrat",
+                            TRUE ~ "missing"))
+
+###############################################################################
+  
+## pivot to have each barcode in a row and each pipeline variant call in a column
+all_barcodes_wide <- all_barcodes_mutcalled %>%
+  ## remove split names and nucleotide changes
+  select(-diff_nt) %>%
+  pivot_wider(names_from = source,
+              values_from = diff_aa)
+
+###############################################################################
+
+## create table describing variant match frequency between analysis pipelines 
+match_table <- all_barcodes_mutcalled %>%
+  ## select only necessary columns
+  select(barcode, source, diff_aa) %>%
+  ## join variants
+  full_join(all_barcodes_mutcalled, by = "barcode") %>%
+  ## remove rows with the same source and remove duplicates (AB = BA comparisons)
+  filter(source.x < source.y) %>%
+  ## comparison, not counting matches between "not seen variants"
+  mutate(comp_true = case_when(diff_aa.x == "not seen" ~ NA_real_,
+                               diff_aa.y == "not seen" ~ NA_real_,
+                               diff_aa.x == diff_aa.y ~ 1,
+                               TRUE ~ 0),
+         comparison = paste0(source.x, " vs. ", source.y)) %>%
+  ## group and calculate fraction of matching barcodes
+  ## frac matching = fraction of non-missing barcodes that match
+  ## frac missing = fraction of total barcodes that are missing in each dataset
+  ## should not equal 1 (different denominators)
+  group_by(comparison) %>%
+  summarise(frac_matching = sum(comp_true, na.rm = TRUE) / sum(!is.na(comp_true)),
+            frac_missing_pacrat = sum(diff_aa.y == "not seen") / n(),
+            frac_missing_mapccs = sum(diff_aa.x == "not seen") / n()) %>%
+  ungroup()
+
+```
+
+```{r count_barcodes}
+
+## plot each method and the number of identified barcodes
+counted_barcodes <- all_barcodes_mutcalled %>%
+  ## filter out "not seen" barcodes
+  filter(diff_aa != "not seen") %>%
+  ## count number of barcodes per sample
+  group_by(source) %>%
+  summarise(num_barcodes = n()) %>%
+  ungroup() %>%
+  ## plot
+  ggplot(aes(x = source,
+             y = num_barcodes)) +
+  ## bar chart
+  geom_bar(aes(fill = source),
+           stat = "identity", position = position_dodge(width = 0.9),
+           color = "black", alpha = 0.7, show.legend = FALSE) +
+  ## add text labels above, in comma format
+  geom_text(aes(label = comma(num_barcodes)),
+            position = position_dodge(width = 0.9), vjust = -0.3) +
+  ## scale fill and axes
+  scale_fill_manual(values = paletteer_d("PNWColors::Bay")[c(5, 1)]) +
+  scale_y_continuous(labels = comma,
+                     expand = c(0, 0),
+                     limits = c(-100, 105000),
+                     breaks = seq(0, 100000, by = 25000)) +
+  ## labels
+  labs(x = "analysis pipeline",
+       y = "number of identified barcodes")
+
+## save file
+ggsave(here("outputs", "plots", "counted_barcodes.pdf"),
+       plot = counted_barcodes,
+       height = 4, width = 4, units = "in")
+
+```
+
+```{r Illumina_PacBio_comparison}
+
+# ## join illumina sequencing and pacbio sequencing together
+# identified_illumina_barcodes <- all_illumina_reads %>%
+#   full_join(all_barcodes_wide, by = "barcode") %>%
+#   ## pivot to long format
+#   pivot_longer(cols = contains("cutoff"),
+#                names_to = "source", 
+#                values_to = "diff_aa") %>%
+#   ## identify missing barcodes from illumina in pacbio and vice versa
+#   mutate(missing = case_when(is.na(reads_mapping) == TRUE ~ "missing from Illumina",
+#                              is.na(diff_aa) == TRUE ~ "missing from PacBio",
+#                              diff_aa == "not seen" ~ "missing from PacBio",
+#                              TRUE ~ "mapped"),
+#          ## replace NA with 0 for plotting
+#          reads_mapping = replace_na(reads_mapping, 0),
+#          pacbio_run = gsub(",.*", "", source),
+#          pacbio_run = factor(pacbio_run, levels = c("round 1", "round 2",
+#                                                     "round 1 + 2")),
+#          label = gsub("^.*?, ", "", source))
+# 
+# ## violin plot of distribution of Illumina reads to PacBio identification
+# missing_violin <- identified_illumina_barcodes %>%
+#   ## filter to only re-prepped DNA from 02.23.22
+#   filter(!is.na(prep)) %>%
+#   ## make line breaks in x axis label and
+#   ## paste together prep and missing to create colored violins
+#   mutate(label = gsub(", ", "\n", label),
+#          prep_missing = paste(prep, missing, sep = ", ")) %>%
+#   ## calculate frequency
+#   group_by(sample, prep) %>%
+#   mutate(freq = reads_mapping / sum(reads_mapping)) %>%
+#   ungroup() %>%
+#   ## plot
+#   ggplot(aes(x = label,
+#              y = freq,
+#              fill = prep_missing)) + 
+#   geom_violin(scale = "width", adjust = 20, alpha = 0.5,
+#               draw_quantiles = c(0.25, 0.5, 0.75)) +
+#   facet_wrap(vars(pacbio_run), ncol = 3) +
+#   scale_fill_viridis_d(option = "C", end = 0.8) +
+#   scale_y_log10(expand = c(0, 0),
+#                 limits = c(3e-10, 3e-5),
+#                 breaks = trans_breaks("log10", function(x) 10^x, n = 5),
+#                 labels = trans_format("log10", math_format(10^.x))) +
+#   labs(x = "assembly method and cutoff",
+#        y = "Illumina barcode frequency",
+#        fill = "sequencing prep and\nmapping status") +
+#   theme(strip.background = element_blank(),
+#         strip.text = element_text(size = 13))
+# 
+# ## save plot
+# ggsave(here("outputs", "plots", "Illumina_vs_PacBio_mapping.pdf"),
+#        plot = missing_violin,
+#        width = 16, height = 4, units = "in")
+
+```
+
+```{r variant_type_summary}
+
+## summary of types of mutation
+all_barcodes_mutcalled_type <- all_barcodes_mutcalled %>%
+  ## count mutations
+  mutate(mut_count = case_when(str_count(diff_aa, ":") > 0 ~ 0,
+                               diff_aa == "WT" ~ 0,
+                               diff_aa == "not seen" ~ 0,
+                               TRUE ~ str_count(diff_aa, ",") + 1),
+         ## split single mutants into WT aa, mutated aa, and position
+         wt_aa = case_when(mut_count == 1 ~ str_sub(diff_aa, start = 1L, end = 1L),
+                           diff_aa == "WT" ~ "WT",
+                           TRUE ~ "XXX"),
+         mut_aa = case_when(mut_count == 1 & grepl("del", diff_aa) == TRUE ~
+                              str_sub(diff_aa, start = -3L, end = -1L),
+                            mut_count == 1 & grepl("del", diff_aa) == FALSE ~
+                              str_sub(diff_aa, start = -1L, end = -1L),
+                            diff_aa == "WT" ~ "WT",
+                           TRUE ~ "YYY"),
+         position = case_when(mut_count == 1 ~ as.numeric(str_extract(diff_aa, "[0-9]+")),
+                              diff_aa == "WT" ~ 0,
+                           TRUE ~ 0),
+         ## aggregate >5 mutations
+         mut_count = case_when(mut_count > 5 ~ "6+",
+                               TRUE ~ as.character(mut_count)),
+         ## classify mutations
+         mut_type = case_when(diff_aa == "not seen" ~ "not seen or filtered",
+                              diff_aa == "WT" ~ "0 - WT",
+                              str_count(diff_aa, ":") > 0 ~ "indel",
+                              mut_count == "1" & mut_aa == "del" ~ "1 - codon deletion",
+                              mut_count == "1" & wt_aa == mut_aa ~ "1 - synonymous",
+                              mut_count == "1" & mut_aa == "X" ~ "1 - nonsense",
+                              mut_count == "1" ~ "1 - missense",
+                              TRUE ~ mut_count))
+
+###############################################################################
+
+## plot number of mutation types by source
+faceted_mutation_type_plot <- all_barcodes_mutcalled_type %>%
+  ## turn columns into factors for easier identification
+  mutate(mut_type = factor(mut_type),
+         source = factor(source, levels = unique(source))) %>%
+  ## count 
+  group_by(source, mut_type) %>%
+  count() %>%
+  ungroup() %>%
+  ## expand to include all values
+  complete(source, mut_type, fill = list(n = 0)) %>%
+  ## create psuedocount for log axis transformation
+  mutate(n2 = n + 1) %>%
+  ## plot
+  ggplot(aes(x = n2,
+             y = fct_rev(mut_type))) + 
+  ## bar of counts
+  geom_bar(aes(fill = mut_type), stat = "identity",
+           alpha = 0.7, show.legend = FALSE) +
+  ## text labels of number of barcodes
+  geom_text(aes(label = comma(n, accuracy = 1)), hjust = 0, nudge_x = 0.1) +
+  ## facet across analysis steps
+  facet_wrap(vars(source), ncol = 2) + 
+  ## scale axis
+  scale_x_log10(expand = c(0, 0),
+                limits = c(1e0, 4e6),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  ## scale fill colors
+  scale_fill_viridis_d(option = "C", end = 0.8) +
+  ## add labels
+  labs(x = "number of mapped barcodes",
+       y = "number and type of variants") +
+  ## change strip settings for easier to read piepline labels
+  theme(strip.background = element_blank(),
+        strip.text = element_text(size = 13))
+
+## save plot
+ggsave(here("outputs", "plots", "faceted_variant_type_counts.pdf"),
+       plot = faceted_mutation_type_plot,
+       width = 8, height = 4, units = "in")
+
+###############################################################################
+
+## plot number of mutation types by source, only for pacrat
+mutation_type_plot <- all_barcodes_mutcalled_type %>%
+  ## filter to only retain pacrat calls
+  filter(source == "pacrat") %>%
+  ## turn columns into factors for easier identification
+  mutate(mut_type = factor(mut_type)) %>%
+  ## count 
+  group_by(mut_type) %>%
+  count() %>%
+  ungroup() %>%
+  ## expand to include all values
+  complete(mut_type, fill = list(n = 0)) %>%
+  ## create psuedocount for log axis transformation
+  mutate(n2 = n + 1) %>%
+  ## plot
+  ggplot(aes(x = n2,
+             y = fct_rev(mut_type))) + 
+  ## bar of counts
+  geom_bar(aes(fill = mut_type), stat = "identity",
+           alpha = 0.7, show.legend = FALSE) +
+  ## text labels of number of barcodes
+  geom_text(aes(label = comma(n, accuracy = 1)), hjust = 0, nudge_x = 0.1) +
+  ## scale axis
+  scale_x_log10(expand = c(0, 0),
+                limits = c(1e0, 4e6),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  ## scale fill colors
+  scale_fill_viridis_d(option = "C", end = 0.8) +
+  ## add labels
+  labs(x = "number of mapped barcodes",
+       y = "number and type of variants")
+
+## save plot
+ggsave(here("outputs", "plots", "variant_type_counts.pdf"),
+       plot = mutation_type_plot,
+       height = 4, width = 6, units = "in")
+
+```
+
+```{r missense_variant_coverage}
+
+## select only single variants and count unique per position
+all_barcodes_mutcalled_single <- all_barcodes_mutcalled_type %>%
+  ## remove everything but 1 aa mutations (nonsense, synonymous, missense)
+  filter(wt_aa != "XXX",
+         wt_aa != "WT") %>%
+  ## turn columns into factors for easier identification
+  mutate(source = factor(source, levels = unique(source))) %>%
+  ## remove 1 - from mut_type and shorten codon deletion
+  mutate(mut_type = gsub("1 - ", "", mut_type),
+         mut_type = gsub("codon ", "", mut_type),
+         ## make factor for plotting
+         mut_type = factor(mut_type,
+                           levels = c("deletion", "synonymous",
+                                      "nonsense", "missense"))) %>%
+  ## select only necessary columns and make distinct
+  select(source, wt_aa, mut_aa, position, mut_type) %>%
+  distinct() %>% 
+  ## group and count
+  group_by(position, source, mut_type) %>%
+  add_count() %>%
+  ungroup() %>%
+  ## select only necessary columns and make distinct
+  select(-contains("aa")) %>%
+  distinct()
+
+###############################################################################
+
+## plot coverage by position for all analysis pipelines
+faceted_coverage_by_position <- all_barcodes_mutcalled_single %>%
+  ## plot
+  ggplot(aes(x = position,
+             y = n,
+             fill = mut_type)) +
+  ## stacked bar chart
+  geom_bar(stat = "identity", position = "stack",
+           alpha = 0.7) + 
+  ## facet across each analysis pipeline
+  facet_wrap(vars(source), ncol = 2) + 
+  ## scale axes
+  scale_x_continuous(expand = c(0, 0),
+                     limits = c(-0.5, 543.5),
+                     breaks = c(1, 100, 200, 300, 400, 500, 542)) +
+  scale_y_continuous(expand = c(0, 0), 
+                     limits = c(-0.2, 22.2),
+                     breaks = c(0, 5, 10, 15, 19, 22)) +
+  ## scale fill color
+  scale_fill_manual(values = paletteer_d("PNWColors::Bay")[c(5, 3, 2, 1)]) +
+  ## add labels
+  labs(x = "position",
+       y = "number of PacBio mapped variants",
+       fill = "variant type") +
+  ## clean up facet labels
+  theme(strip.background = element_blank(),
+        strip.text = element_text(size = 13),
+        panel.spacing = unit(1, "lines"))
+
+## save plot
+ggsave(here("outputs", "plots", "faceted_coverage_by_position.pdf"),
+            plot = faceted_coverage_by_position,
+            width = 12, height = 4, units = "in")
+
+###############################################################################
+
+## make single version pacrat
+coverage_plot <- all_barcodes_mutcalled_single %>%
+  ## filter only pacrat
+  filter(source == "pacrat") %>%
+  ## plot
+  ggplot(aes(x = position,
+             y = n,
+             fill = mut_type)) +
+  ## stacked bar chart
+  geom_bar(stat = "identity", position = "stack",
+           alpha = 0.7) + 
+  ## scale axes
+  scale_x_continuous(expand = c(0, 0),
+                     limits = c(-0.5, 543.5),
+                     breaks = c(1, 100, 200, 300, 400, 500, 542)) +
+  scale_y_continuous(expand = c(0, 0), 
+                     limits = c(-0.2, 22.2),
+                     breaks = c(0, 5, 10, 15, 19, 22)) +
+  ## scale fill color
+  scale_fill_manual(values = paletteer_d("PNWColors::Bay")[c(5, 3, 2, 1)]) +
+  ## add labels
+  labs(x = "position",
+       y = "number of PacBio mapped variants",
+       fill = "variant type")
+
+## save plot
+ggsave(here("outputs", "plots", "final_coverage_plot.pdf"),
+            plot = coverage_plot,
+            width = 8, height = 4, units = "in")
+
+###############################################################################
+
+## calculate coverage of variant types
+unique_variants <- all_barcodes_mutcalled_type %>%
+  ## filter to only pacrat
+  filter(source == "pacrat") %>%
+  ## remove all non-single variants 
+  filter(grepl("1 - ", mut_type)) %>%
+  ## remove extra characters from mut_type
+  mutate(mut_type = gsub("1 - ", "", as.character(mut_type)),
+         mut_type = gsub("codon ", "", as.character(mut_type)),
+         ## convert back to factor
+         mut_type = factor(mut_type, levels = c("deletion", "nonsense",
+                                                "synonymous", "missense"))) %>%
+  ## compare only positions 2-541 (not start and stop)
+  filter(position > 1 & position < 542) %>%
+  ## select only distinct variants
+  select(diff_aa, mut_type) %>%
+  distinct() %>%
+  ## count within in each mutation type
+  group_by(mut_type) %>%
+  count(name = "n_variants_present") %>%
+  ungroup() %>%
+  ## calculate aa length for each group, except start/stop codons
+  mutate(aa_length = (str_length(lib_wt_TFO_nt) / 3) - 2,
+         ## calculate total possible variants
+         n_possible_variants = case_when(mut_type == "missense" ~ 19 * aa_length,
+                                         TRUE ~ aa_length),
+         ## calculate fraction in library
+         frac_variants_present = round(n_variants_present / n_possible_variants,
+                                       digits = 3))
+
+## output as table
+write_csv(unique_variants, file = here("outputs", "csv",
+                                       "unique_variants_by_type.csv")) 
+  
+```
+
+```{r write_csv}
+
+## isolate just pacrat be written to csv
+all_barcodes_mutcalled_type %>%
+  ## filter to include only specified round and filter out unseen barcodes
+  filter(source == "pacrat",
+         diff_aa != "not seen") %>%
+  ## remove unnecessary columns
+  select(barcode, diff_aa, diff_nt) %>%
+  ## write to csv
+  write_csv(here("outputs", "csv", "final_barcode_variant_map_all.csv"))
+
+## isolate only single variant barcodes from pacrat
+all_barcodes_mutcalled_type %>%
+  ## filter to include only specified round and single variants
+  filter(source == "pacrat",
+         grepl("1 - ", mut_type) == TRUE) %>%
+  ## remove unnecessary columns
+  select(barcode, diff_aa, diff_nt) %>%
+  write_csv(here("outputs", "csv", "final_barcode_variant_map_single.csv"))
+
+```
+
+```{r collectors_curve}
+
+# ## import data from direct grep
+# grepped <- read_delim(here("inputs", "round1-2", "allbc_noCterm",
+#                            "captured_barcodes_matchseq.txt"),
+#                       delim = "\n", col_names = "barcode")
+# 
+# ## import data extracted from mapCCS
+# extracted_mapccs <- read_delim(here("inputs", "round1-2", "allbc_noCterm",
+#                                     "extracted_aligned_barcodes.txt"),
+#                                delim = "\n", col_names = "barcode")
+# 
+# ## multithread processing setup
+# plan(multisession)
+# 
+# ## iterate collection curve 100 times with random order each time
+# iterated <- future_map_dfr(1:100, ~collectors_curve(extracted_mapccs),
+#                            .id = "iteration",
+#                            .options = furrr_options(seed = TRUE))
+# 
+# ## get summarized mean value for plotting
+# iterated_summarized <- iterated %>%
+#   group_by(obs_num) %>%
+#   summarise(mean_val = mean(uniq_num))
+# 
+# ## reduce number of observations to not exhaust memory
+# reduced_iterated_summarized <- iterated_summarized %>%
+#   filter(obs_num == min(obs_num) |
+#            obs_num == max(obs_num) |
+#            obs_num %% 1000 == 0) %>%
+#   mutate(obs_num_mil = obs_num / 1000000)
+# 
+# 
+# collectors_curve_plot <- ggplot() + 
+#   geom_line(data = reduced_iterated_summarized,
+#             aes(x = obs_num_mil,
+#                 y = mean_val),
+#             color = "black", size = 1) +
+#   scale_x_continuous(expand = c(0, 0),
+#                      limits = c(-0.05, 2.45),
+#                      breaks = seq(0, 2.4, by = 0.4),
+#                      label = c(0, 0.4, 0.8, 1.2, 1.6, 2, 2.4)) +
+#   scale_y_continuous(label = comma,
+#                      expand = c(0, 0),
+#                      limits = c(-1000, 360000),
+#                      breaks = seq(0, 350000, by = 50000)) +
+#   labs(x = "PacBio sequencing reads (millions)",
+#        y = "unique barcodes identified")
+# 
+# ## save collector's curve
+# ggsave(here("outputs", "plots", "collectors_curve.pdf"),
+#        height = 4, width = 6, units = "in")
+
+```
+
+```{r pacbio stats}
+
+## read in pacbio CCS reads
+pacbio_CCS <- read_csv(here("inputs", "mapCCS", "CCS_counts.csv"),
+                       col_names = c("barcode", "count"))
+
+## add psuedocounts and log transform
+CCS_pseudocounts_by_barcode <- pacbio_CCS %>%
+  ## count number of barcodes with n CCS reads
+  group_by(count) %>%
+  count() %>%
+  ungroup() %>%
+  ## add pseudocount to n = 1 to allow for log10 plotting
+  mutate(n = as.numeric(n),
+         pseudon = case_when(n == 1 ~ n + 0.2,
+                             TRUE ~ n),
+         ## log transform
+         logn = log10(pseudon))
+
+## summary statistics for CCS reads
+CCS_summarized <- pacbio_CCS %>%
+  summarise(total_CCS = sum(count, na.rm = TRUE),
+            mean_CCS = mean(count, na.rm = TRUE),
+            median_CCS = median(count, na.rm = TRUE))
+
+## histogram plot of CCS reads 
+CCS_histogram <- ggplot() +
+  ## histogram
+  geom_col(data = CCS_pseudocounts_by_barcode,
+           aes(x = count,
+               y = logn)) +
+  ## mean CCS reads
+  geom_vline(data = CCS_summarized,
+             aes(xintercept = mean_CCS),
+             linetype = "dashed", color = "red") +
+  geom_text(data = CCS_summarized,
+            aes(label = paste("mean:", round(mean_CCS, digits = 1))),
+            x = 60, y = 3.8, color = "red", hjust = 0) +
+  ## median CCS reads
+  geom_vline(data = CCS_summarized,
+             aes(xintercept = median_CCS),
+             linetype = "dashed", color = "blue") +
+  geom_text(data = CCS_summarized,
+            aes(label = paste("median:", round(median_CCS, digits = 1))),
+            x = 60, y = 3.5, color = "blue", hjust = 0) +
+  ## scale axes
+  scale_x_continuous(expand = c(0, 0), 
+                     limits = c(-0.5, 162),
+                     breaks = seq(0, 160, by = 20)) +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(0, 4.1),
+                     breaks = c(log10(1.2), seq(1, 4, by = 1)),
+                     labels = math_format(10^.x)(0:4)) +
+  ## axis labels
+  labs(x = "CCS reads per barcode",
+       y = "number of unique barcodes")
+
+## save
+ggsave(here("outputs", "plots", "CCS_reads_per_barcode.pdf"), plot = CCS_histogram,
+       height = 4, width = 8, units = "in")
+
+```
+
+```

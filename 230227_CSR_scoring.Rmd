@@ -1,0 +1,865 @@
+---
+title: "Scoring TFO-CSR for functional amplification of DNA"
+author: "Nicholas Popp"
+date: "02/27/2023"
+output: pdf_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(readr.show_col_types = FALSE)
+```
+
+```{r libraries and functions}
+
+## I don't remember which of these are for what parts of the script
+## most of them are for plotting
+## feel free to remove and figure out
+## these will all install the package if not present on the system already
+## and then will load them
+
+## scales 1.1.1 for scientific notation
+if (!require(scales)) install.packages('scales')
+library(scales)
+
+## tidyverse 1.3.1 for ggplot, dplyr, data manipulation
+## absolutely required
+if (!require(tidyverse)) install.packages('tidyverse')
+library(tidyverse)
+
+## paletteer 1.4.0 for color palettes
+if (!require(paletteer)) install.packages('paletteer')
+library(paletteer)
+
+## ggpubr 0.4.0 for correlation stats
+if (!require(ggpubr)) install.packages('ggpubr')
+library(ggpubr)
+
+## ggrastr 1.0.0 for reducing plot size when >1000 points
+if (!require(ggrastr)) install.packages('ggrastr')
+library(ggrastr)
+
+## GGally 2.1.2 for plotting multiple correlations
+if (!require(GGally)) install.packages('GGally')
+library(GGally)
+
+## janitor 2.1.2 for cleaning data
+if (!require(janitor)) install.packages('janitor')
+library(janitor)
+
+## patchwork 1.1.1 for aligning multi-panel plots
+if (!require(patchwork)) install.packages('patchwork')
+library(patchwork)
+
+## here 1.0.1 for directory management
+## absolutely required
+if (!require(here)) install.packages('here')
+library(here)
+
+###############################################################################
+
+## make sure working directories are correct
+## the analysis file should be one directory above all input files
+i_am("230227_CSR_scoring.Rmd")
+
+###############################################################################
+
+## set seed for reproducible plots (randomization)
+set.seed(627)
+
+## set plot themeing
+theme_set(theme_bw(base_size = 13))
+
+###############################################################################
+
+## set up ggplot to look pretty, sized for publication
+ggplot <- function(...) {
+  ggplot2::ggplot(...) + 
+    ## white background with black border
+    theme(panel.background = element_rect(fill = "white", 
+                                          color = "black"),
+          ## hide gridlines
+          panel.grid.major = element_line(color = "grey80"),
+          panel.grid.minor = element_blank(),
+          ## change legend position
+          legend.position = "right",
+          legend.justification = "center",
+          legend.key = element_rect(fill = "white", size = 0.3),
+          ## change text
+          axis.title = element_text(size = 15, color = "black"),
+          axis.text = element_text(size = 13, color = "black"),
+          legend.text = element_text(size = 13, color = "black"),
+          legend.title = element_text(size = 15, color = "black"))
+}
+
+###############################################################################
+
+## create beautiful heatmaps
+TFO_heatmap_plot <- function(...) {
+  ggplot(data = ...,
+         aes(x = position,
+             y = mut_aa,
+             fill = log2val)) +
+    ## setup to use color to plot missing data
+    geom_tile(aes(color = "")) +
+    ## plot non-NA data with grey stroke
+    geom_tile(data = . %>%
+                filter(!is.na(mut_aa)),
+              color = "grey20") +
+    ## fill in WT positions white (WT score, by definition)
+    geom_tile(data = . %>% filter(is_wt == "WT"),
+              fill = "white", color = "grey20") +
+    ## identify WT with point in tile
+    geom_point(data = . %>% filter(is_wt == "WT"),
+               aes(x = position,
+                   y = mut_aa,
+                   shape = ""),
+               size = 1, color = "black") +
+    ## adjust fill colors (red to blue, white = WT)
+    scale_fill_distiller(palette = "RdBu", direction = -1,
+                         na.value = "grey50",
+                         limits = c(-8, 8)) +
+    scale_colour_manual(values = NA) +
+    ## scale y axis to remove excess space
+    scale_y_discrete(expand = c(0, 0)) +
+    ## labels
+    labs(x = "position",
+         y = "substituted amino acid") +
+    ## adjust legends 
+    guides(color = guide_legend(title = "missing",
+                                override.aes = list(fill = "grey50"),
+                                order = 3),
+           shape = guide_legend(title = "WT",
+                                override.aes = list(size = 3),
+                                order = 2),
+           fill = guide_colorbar(title = "score",
+                                 frame.colour = "grey20",
+                                 ticks.colour = "grey20",
+                                 order = 1)) +
+    ## adjust plot features
+    theme(panel.border = element_rect(fill = NA, color = "black"),
+          axis.text.y = element_text(hjust = 0.5))
+}
+
+```
+
+```{r define tiles and WT sequence}
+
+## this entire section will need to be made into functions that can input
+## user-defined data, since the user will need to input the WT sequence of their
+## gene as well as define if there are sublibraries within that gene (e.g. tiles)
+## and what the positional boundaries on those sublibraries are
+
+## WT gene sequence in amino acids
+   ## this could also be done as nucleotides, and a function could be used
+   ## to convert that to codons and/or amino acids
+wt_TFO <- "MPLEEAPWPPPEGAFVGFVLSRPEPMWAELKALAACRDGRVHRAEDPLAGLGDLEEVRGLLAKDLAVLALREGLDLAPGDDPMLLAYLLDPSNTTPEGVARRYGGEWTEDAAHRALLSERLHRNLLKRLEGEEKLLWLYHEVEKPLSRVLAHMEATGVRLDVAYLQALSLELAEEIRRLEEEVFRLAGHPFNLNSRDQLERVLFDELRLPALGKTQKTGKRSTSAAVLEALREAHPIVEKILQHRELTKLKNTYVDPLPSLVHPRTGRLHTRFNQTATATGRLSSSDPNLQNIPVRTPLGQRIRRAFVAEAGWALVALDYSQIELRVLAHLSGDENLIRVFQEGKDIHTQTASWMFGVPPEAVDPLMRRAAKTINFGIVYGMSPYGLAKELKIGRREAKAFIERYFERYPGVKRYMEQIVAEAREKGYVETLFGRRRYVPDLNARVKSVREAAERMAFNMPVQGTAADLMKLAMVKLFPRLREMGARMLLQVHDELLLEAPQARAEEVAALAKEAMEKAYPLAVPLEVEVGIGEDWLSAKG"
+
+## convert WT TFO sequence to dataframe
+## I don't think this could be a python dictionary, because it's not 1-to-1
+## but if I'm wrong, that would be much more efficient
+## input should be a string of amino acids (in this case, wt_TFO)
+## output should be a dataframe with two columns
+   ## 1: wt_aa - wildtype amino acid
+   ## 2: position - position of amino acid within gene
+wt_TFO_aa <- tibble(wt_aa =
+                      unlist(str_extract_all(wt_TFO, boundary("character"))),
+                    position = seq(1, nchar(wt_TFO), by = 1))
+
+```
+
+```{r read in sequencing data}
+
+## import data from all Illumina sequencing runs
+## recursively looks in each folder for a csv file with "all_barcode_counts",
+## which is how my Illumina processing script outputs file names
+## and then clean up sample names, and extract technical replicate info
+## input file should have 3 columns
+   ## 1: barcode - barcode sequence
+   ## 2: read counts - number of times barcode is seen (numeric)
+   ## 3: sample - name which includes any/all identifiers (e.g. condition, etc.)
+      ## this should be changed to allow generalized input (e.g. split information)
+## output dataframe should have 5 columns
+   ## 1: barcode - barcode sequence
+   ## 2: sample - sample without technical replicate information
+   ## 3: rep1 - technical replicate 1 read counts
+   ## 4: rep2 - technical replicate 2 read counts
+   ## 5: total_reads - sum of rep1 and rep2
+TFO_illumina <- list.files(path = here("inputs"),
+                           pattern = "*all_barcode_counts.csv",
+                           recursive = TRUE) %>%
+  ## read in files in parallel to improve speed
+  ## assign file names because my Illumina script doesn't do that...
+  map_df(~read_csv(here("inputs", .),
+                   col_names = c("barcode", "reads_mapping", "sample"))) %>%
+  ## remove illumina indexed sample number from sample column
+     ## specific to my sample naming scheme
+  mutate(sample = gsub("_S[0-9]+$", "", sample)) %>%
+  ## split out technical replicate from sample using regex
+     ## specific to my sample naming scheme
+  extract(sample, into = c("sample", "tech_rep"), "^(.*)([a-b])") %>%
+  ## widen data to have each technical replicate as a column
+  ## fill in barcodes that are present in one replicate but not the other
+  ## with zero reads (as they were not seen)
+  pivot_wider(names_from = tech_rep,
+              names_prefix = "rep",
+              values_from = reads_mapping,
+              values_fill = 0) %>%
+  ## sum technical replicates
+  mutate(total_reads = repa + repb)
+
+###############################################################################
+
+## read in barcode variant map from PacBio
+## only works for single variant maps
+   ## should input a function to remove multiple variants
+   ## or prompt user for choice to keep
+## input file should have 3 columns
+   ## 1: barcode - barcode sequence
+   ## 2: diff_aa - changed amino acid, one letter system (e.g. L376N)
+   ## 3: diff_nt - list of changed nucleotides, separated by commas
+      ##: (e.g. C1126A, T1127A, T1128C)
+## output file should have 6 columns
+   ## 1: barcode - barcode sequence
+   ## 2: diff_aa - changed amino acid, one letter system (e.g. L376N)
+   ## 3: diff_nt - list of changed nucleotides, separated by commas
+      ## (e.g. C1126A, T1127A, T1128C)
+   ## 4: position - numeric amino acid position in protein (e.g. 376)
+      ## WT should be = 0
+   ## 5: wt_aa - wildtype amino acid, one letter (e.g. L)
+      ## WT should be = NA
+   ## 6: mut_aa - mutated amino acid, one letter (e.g. N)
+      ## WT should be = NA
+TFO_bcv_map <- read_csv(here("inputs", "pacbio", "outputs", "csv",
+                             "final_barcode_variant_map_all.csv")) %>%
+  ## remove multiple variants
+  filter(!grepl(",", diff_aa)) %>%
+  ## remove frameshift, insertion, and deletion variants
+  filter(!grepl("length", diff_aa)) %>%
+  mutate(position = case_when(diff_aa == "WT" ~ 0,
+                              TRUE ~ as.numeric(str_extract(diff_aa, "[0-9]+"))),
+         ## identify WT and variant amino acids, replace WT as NA
+         wt_aa = case_when(diff_aa != "WT" ~ str_sub(diff_aa, start = 1L, end = 1L),
+                           TRUE ~ NA_character_),
+         mut_aa = case_when(grepl("del", diff_aa) == TRUE ~ "del",
+                            diff_aa != "WT" ~ str_sub(diff_aa, start = -1L, end = -1L),
+                            TRUE ~ NA_character_))
+
+###############################################################################
+
+## join illumina reads with barcode map for single variants
+## should only keep barcodes that are present in the barcode variant map
+## input files
+   ## 1: illumina_data dataframe
+   ## 2: bcv_map_single dataframe
+## output file should have 9 columns
+   ## 1: barcode - barcode sequence
+   ## 2: sample - sample, without technical replicate information
+   ## 3: rep1 - technical replicate 1 read counts
+   ## 4: rep2 - technical replicate 2 read counts
+   ## 5: total_reads - sum of rep1 and rep2
+   ## 6: diff_aa - mutation, in form A112V
+   ## 7: position - numeric amino acid position in protein (e.g. 376)
+      ## WT should be = 0
+   ## 8: wt_aa - wildtype amino acid, one letter (e.g. L)
+      ## WT should be = NA
+   ## 9: mut_aa - mutated amino acid, one letter (e.g. N)
+      ## WT should be = NA
+mapped_variants_TFO <- inner_join(TFO_illumina,
+                                  TFO_bcv_map,
+                                  by = "barcode") %>%
+  ## remove diff_nt since I don't use it 
+  select(-diff_nt)
+
+```
+
+```{r technical replicates}
+
+## calculate barcode frequency in each replicate
+## input file is illumina_data dataframe
+## output dataframe should have 7 columns
+   ## 1: barcode - barcode sequence
+   ## 2: sample - sample without technical replicate information
+   ## 3: rep1 - technical replicate 1 read counts
+   ## 4: rep2 - technical replicate 2 read counts
+   ## 5: total_reads - sum of rep1 and rep2
+   ## 6: freq_rep1 - frequency of barcode within technical replicate 1
+   ## 7: freq_rep2 - frequency of barcode within technical replicate 2
+TFO_barcode_frequency <- TFO_illumina %>%
+  ## add pseudocount to allow log transformations
+  mutate(repa = repa + 1,
+         repb = repb + 1) %>%
+  ## calculate barcode frequency for each replicate for each unique sample
+  group_by(sample) %>%
+  mutate(freq_repa = repa / sum(repa, na.rm = TRUE),
+         freq_repb = repb / sum(repb, na.rm = TRUE)) %>%
+  ungroup()
+
+## calculate technical duplicate correlations for each unique sample
+## want these to be as high as possible, usually > 0.8
+## input: barcode_frequency dataframe
+## output dataframe should have 2 columns
+   ## 1: sample - sample without technical replicate information
+   ## 2: pear_cor - pearson's correlation (r) of technical replicates
+TFO_barcode_tech_correlations <- barcode_frequency %>%
+  group_by(sample) %>%
+  summarise(pear_cor = cor(freq_repa, freq_repb, method = "pearson",
+                           use = "pairwise.complete.obs")) %>%
+  ungroup()
+
+###############################################################################
+
+## calculate variant frequency in each replicate
+## input file is mapped_variants dataframe
+## output dataframe should have 10 columns
+   ## 1: sample - sample without technical replicate information
+   ## 2: diff_aa - mutation, in form A112V
+   ## 3: position - numeric amino acid position in protein (e.g. 376)
+      ## WT should be = 0
+   ## 4: wt_aa - wildtype amino acid, one letter (e.g. L)
+      ## WT should be = NA
+   ## 5: mut_aa - mutated amino acid, one letter (e.g. N)
+      ## WT should be = NA
+   ## 6: var_rep1 - technical replicate 1 read counts
+   ## 7: var_rep2 - technical replicate 2 read counts
+   ## 8: total_reads - sum of rep1 and rep2
+   ## 9: freq_rep1 - frequency of variant within technical replicate 1
+   ## 10: freq_rep2 - frequency of variant within technical replicate 2
+TFO_variant_frequency <- mapped_variants_TFO %>%
+  ## group by sample and variant and sum the number of reads
+  ## for all barcodes with that variant
+  group_by(sample, diff_aa) %>%
+  mutate(var_repa = sum(repa, na.rm = TRUE),
+         var_repb = sum(repb, na.rm = TRUE)) %>%
+  ungroup() %>%
+  ## remove unnecessary columns and retain only unique values
+  ## so there is only 1 row per variant/sample combination
+  select(-repa, -repb, -barcode, -total_reads) %>%
+  distinct() %>%
+  ## add pseudocount to allow log transformations
+  mutate(var_repa = var_repa + 1,
+         var_repb = var_repb + 1) %>%
+  ## calculate total number of reads per sample for each variant
+  mutate(total_reads = var_repa + var_repb) %>%
+  ## calculate barcode frequency for each replicate for each unique sample
+  group_by(sample) %>%
+  mutate(freq_repa = var_repa / sum(var_repa, na.rm = TRUE),
+         freq_repb = var_repb / sum(var_repb, na.rm = TRUE)) %>%
+  ungroup()
+
+## calculate technical duplicate correlations for each unique sample
+## want these to be as high as possible, usually > 0.8
+## input: variant_frequency dataframe
+## output dataframe should have 2 columns
+   ## 1: sample - sample without technical replicate information
+   ## 2: pear_cor - pearson's correlation (r) of technical replicates
+TFO_variant_tech_correlations <- TFO_variant_frequency %>%
+  group_by(sample) %>%
+  summarise(pear_cor = cor(freq_repa, freq_repb, method = "pearson",
+                           use = "pairwise.complete.obs")) %>%
+  ungroup()
+
+###############################################################################
+
+## pearson's correlations can be skewed strongly by outliers.
+## as such, it's always important to visualize and inspect the scatterplots
+## for each sample. plotting every point can be very time-consuming and create 
+## massive files that are impossible to plot. instead, these plots are hexbinned
+## such that the fill indicates the number of unique barcodes (or variants)
+## that fall within that hexbin.
+
+## replicate correlation plot per variant
+TFO_rep_corr_barcode_freq <- ggplot(data = TFO_barcode_frequency,
+                                    aes(x = freq_repa,
+                                        y = freq_repb)) +
+  ## bin points to 100 x 100 hex
+  geom_hex(bins = 30) +
+  ## perfect correlation line
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  ## annotate correlation
+  geom_text(data = TFO_barcode_tech_correlations,
+            aes(label = paste0("R = ", round(pear_cor, digits = 3)),
+                x = 1e-7, y = 1e-0),
+            hjust = 0, vjust = 1) +
+  ## plot all samples as individual plots, 12 columns
+  facet_wrap(vars(sample), ncol = 7) +
+  ## adjust axes
+  scale_y_log10(expand = c(0, 0),
+                limits = c(2e-8, 2e-0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) + 
+  scale_x_log10(expand = c(0, 0),
+                limits = c(2e-8, 2e-0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 6),
+                labels = trans_format("log10", math_format(10^.x))) +
+  ## adjust fill
+  scale_fill_viridis_c(limits = c(1e0, 1e7),
+                       trans = "log10",
+                       alpha = 0.7,
+                       breaks = trans_breaks("log10", function(x) 10^x, n = 8),
+                       labels = trans_format("log10", math_format(10^.x))) +
+  ## adjust legend and axis labels
+  labs(x = "barcode frequency in technical replicate 1",
+       y = "barcode frequency in technical replicate 2",
+       fill = "unique barcodes")
+
+## replicate correlation plot per variant
+TFO_rep_corr_variant_freq <- ggplot(data = TFO_variant_frequency,
+                                    aes(x = freq_repa,
+                                        y = freq_repb)) +
+  ## bin points to 50 x 50 hex
+  geom_hex(bins = 30) +
+  ## perfect correlation line
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  ## annotate correlation
+  geom_text(data = TFO_variant_tech_correlations,
+            aes(label = paste0("R = ", round(pear_cor, digits = 3)),
+                x = 1e-8, y = 1e0),
+            hjust = 0, vjust = 1) +
+  ## plot all samples as individual plots, 12 columns
+  facet_wrap(vars(sample), ncol = 7) +
+  ## adjust axes
+  scale_y_log10(expand = c(0, 0),
+                limits = c(2e-9, 2e0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 5),
+                labels = trans_format("log10", math_format(10^.x))) + 
+  scale_x_log10(expand = c(0, 0),
+                limits = c(2e-9, 2e-0),
+                breaks = trans_breaks("log10", function(x) 10^x, n = 5),
+                labels = trans_format("log10", math_format(10^.x))) +
+  ## adjust fill
+  scale_fill_viridis_c(limits = c(1e0, 1e4),
+                       trans = "log10",
+                       alpha = 0.7,
+                       breaks = trans_breaks("log10", function(x) 10^x, n = 5),
+                       labels = trans_format("log10", math_format(10^.x))) +
+  ## adjust legend and axis labels
+  labs(x = "variant frequency in technical replicate 1",
+       y = "variant frequency in technical replicate 2",
+       fill = "unique variants")
+
+```
+
+```{r scoring variants}
+
+ba_filtered_TFO <- mapped_variants_TFO %>% 
+  mutate(type = case_when(position == 0 ~ "WT",
+                          grepl("X", diff_aa) ~ "nonsense",
+                          grepl("del", diff_aa) ~ "deletion",
+                          wt_aa == mut_aa ~ "synonymous",
+                          mut_aa != wt_aa ~ "missense")) %>%
+  select(-contains("rep")) %>%
+  pivot_wider(names_from = sample,
+              values_from = total_reads) %>%
+  mutate(b1a = B1 / A, b2a = B2 / A, b3a = B3 / A) %>%
+  filter(!is.na(b1a)) %>% filter(!is.na(b2a)) %>% filter(!is.na(b3a)) %>% 
+  mutate(avgb = (b1a + b2a + b3a) / 3) %>% 
+  filter(avgb <= 1) %>%
+  select(-b1a, -b2a, -b3a, -avgb) %>%
+  pivot_longer(cols = matches("^[A-E]", ignore.case = FALSE),
+               names_to = "sample",
+               values_to = "total_reads")
+
+TFO_bc_per_var <- mapped_variants_TFO %>%
+  group_by(sample, diff_aa) %>%
+  count(name = "num_barcodes") %>%
+  ungroup()
+
+bc_threshold <- 4
+
+TFO_retained_bc <- TFO_bc_per_var %>%
+  filter(num_barcodes > bc_threshold) %>%
+  left_join(mapped_variants_TFO)
+
+## split off WT to make complete function in next steps easier
+TFO_mapped_wt <- ba_filtered_TFO %>% 
+  filter(diff_aa == "WT")
+
+## split off non-WT and clean data for next steps. many parts of this will not
+## be necessary for the final product, and I will annotate those accordingly.
+## the main reason this cleaning is happening is to ensure that the data are 
+## analyzed appropriately within the correct conditions
+## input file is mapped_variants dataframe
+## output dataframe should have 6 columns
+   ## 1: sample - sample without technical replicate information
+   ## 2: wt_aa - wildtype amino acid, one letter (e.g. L)
+      ## WT should be = NA
+   ## 3: position - numeric amino acid position in protein (e.g. 376)
+      ## WT should be = 0
+   ## 4: mut_aa - mutated amino acid, one letter (e.g. N)
+      ## WT should be = NA
+   ## 5: diff_aa - mutation, in form A112V
+   ## 6: total_reads - sum of rep1 and rep2
+TFO_cleaned_mapped_variants <- ba_filtered_TFO %>%
+  filter(diff_aa != "WT") %>%
+  ## fill in missing data across samples
+  ## the plotting functions that I've made all require explicit missing data
+  ## otherwise, it will not plot them as "missing" in the final heatmap
+  complete(position = seq(1, nchar(wt_TFO), by = 1), mut_aa, sample,
+           fill = list(NA)) %>%
+  ## replace NA values for wt_aa and diff_aa for missing variants since 
+  ## complete fills in NA for missing variables
+  mutate(wt_aa = case_when(is.na(diff_aa) == TRUE ~ wt_TFO_aa$wt_aa[position],
+                           TRUE ~ wt_aa),
+         diff_aa = case_when(is.na(diff_aa) == TRUE ~ paste0(wt_aa, position, mut_aa),
+                             TRUE ~ diff_aa)) %>%
+  ## bind rows of WT data to re-form full data set 
+  bind_rows(TFO_mapped_wt) %>%
+  ## replace missing values for sequencing with 0
+  replace_na(list(total_reads = 0)) %>%
+  ## sum duplicate reads by variant per tile, antibody, bin, and biological replicate
+  ## we may want to allow people to determine whether they want to score by something
+  ## other than variant here (e.g. by barcode, by codon, by nucleotide, etc.)
+  ## this is our "binwise" count
+  group_by(wt_aa, position, mut_aa, sample) %>%
+  summarise(total_reads = sum(total_reads)) %>%
+  ungroup()
+
+## sum all variant reads across all bins within an experiment. we will use
+## this to filter out poorly detected variants at the next step. I am still 
+## debating whether this needs to happen before or after calculating the 
+## binwise frequencies. the original paper did not filter until after scoring
+## but I feel like that will cause skewing of the results (statistically)
+## haven't proven that yet though...
+## input file is cleaned_mapped_variants dataframe
+## output dataframe should have 9 columns
+   ## 1: wt_aa - wildtype amino acid, one letter (e.g. L)
+      ## WT should be = NA
+   ## 2: position - numeric amino acid position in protein (e.g. 376)
+      ## WT should be = 0
+   ## 3: mut_aa - mutated amino acid, one letter (e.g. N)
+      ## WT should be = NA
+   ## 4: tile - sublibrary tile (e.g. tile1)
+   ## 5: antibody - antibody/condition (e.g. "001", "25 nM treatment")
+   ## 6: exp_replicate - experimental replicate
+   ## 7: all_variant_reads_frequency - total frequency of a given variant
+      ## within an experiment (across all 4 bins), used for filtering
+   ## 8: bin - VAMP-seq sorting bin (usually bin1 to bin4)
+   ## 9: total_binwise_reads - number of sequencing reads mapping to a given
+      ## variant (all barcodes) within an experiment and bin
+TFO_variants_with_filter_frequencies <- TFO_cleaned_mapped_variants %>%
+  #filter(total_reads > 200) %>%
+  #filter(mut_aa != "X" | position == 0) %>%
+  group_by(wt_aa, position, mut_aa, sample) %>%
+  ## sum all reads for each variant across each experiment (all bins)
+  summarise(all_variant_reads = sum(total_reads)) %>%
+  ungroup() %>%
+  ## calculate overall variant frequency across each experiment (all bins)
+  group_by(sample) %>%
+  mutate(all_variant_reads_frequency = all_variant_reads / sum(all_variant_reads)) %>%
+  ungroup() %>%
+  ## remove unnecessary columns
+  select(-all_variant_reads) %>%
+  ## join back with original data to retain bin information
+  right_join(TFO_cleaned_mapped_variants)
+  ## split sample into condition and replicate for comparison
+  #extract(sample, into = c("condition", "replicate"),
+  #        regex = "([A-Z])([0-9])") %>%
+  ## A will become NA because there isn't replicate information
+  ## so replace with condition = A and replicate = 1
+  #replace_na(list(condition = "A", replicate = "1"))
+
+#########################################################################
+
+## score variants according to VAMP-seq weights (weighted average)
+## this section will benefit from a parameterization where it can figure out
+## what the best weights to use for the data are. the other option is to have
+## the user input the weights that they would like to use with a default 
+## 0.25-0.50-0.75-1.00 weighting scheme.
+## input file is cleaned_mapped_variants dataframe
+## output dataframe should have 9 columns
+   ## 1: wt_aa - wildtype amino acid, one letter (e.g. L)
+      ## WT should be = NA
+   ## 2: position - numeric amino acid position in protein (e.g. 376)
+      ## WT should be = 0
+   ## 3: mut_aa - mutated amino acid, one letter (e.g. N)
+      ## WT should be = NA
+   ## 4: tile - sublibrary tile (e.g. tile1)
+   ## 5: antibody - antibody/condition (e.g. "001", "25 nM treatment")
+   ## 6: exp_replicate - experimental replicate
+   ## 7: weighted_average - weighted average of variant presence across all bins
+   ## 8: type - amino acid substitution type
+   ## 9: score - min-max normalized score for variant in given experiment
+
+test_wt <- TFO_variants_with_filter_frequencies %>%
+  filter(position == 0) %>%
+  rename(wt_reads = total_reads) %>%
+  select(wt_reads, sample)
+
+test <- TFO_variants_with_filter_frequencies %>%
+  select(-all_variant_reads_frequency) %>%
+  left_join(test_wt, by = "sample") %>%
+  filter(total_reads > 0) %>%
+  ## pseudocount
+  mutate(wt_reads = wt_reads + 0.5,
+         total_reads = total_reads + 0.5) %>%
+  pivot_wider(names_from = sample,
+              values_from = c(wt_reads, total_reads)) %>%
+  mutate(type = case_when(mut_aa == "del" ~ "deletion",
+                          mut_aa == "X" ~ "nonsense",
+                          position == 0 ~ "WT",
+                          mut_aa == wt_aa ~ "synonymous",
+                          mut_aa != wt_aa ~ "missense"),
+         ba_rep1 = log(total_reads_B1 / wt_reads_B1) - log(total_reads_A / wt_reads_A),
+         ba_rep2 = log(total_reads_B2 / wt_reads_B2) - log(total_reads_A / wt_reads_A),
+         ba_rep3 = log(total_reads_B3 / wt_reads_B3) - log(total_reads_A / wt_reads_A),
+         ca_rep1 = log(total_reads_C1 / wt_reads_C1) - log(total_reads_A / wt_reads_A),
+         ca_rep2 = log(total_reads_C2 / wt_reads_C2) - log(total_reads_A / wt_reads_A),
+         ca_rep3 = log(total_reads_C3 / wt_reads_C3) - log(total_reads_A / wt_reads_A),
+         da_rep1 = log(total_reads_D1 / wt_reads_D1) - log(total_reads_A / wt_reads_A),
+         da_rep2 = log(total_reads_D2 / wt_reads_D2) - log(total_reads_A / wt_reads_A),
+         da_rep3 = log(total_reads_D3 / wt_reads_D3) - log(total_reads_A / wt_reads_A),
+         ea_rep1 = log(total_reads_E1 / wt_reads_E1) - log(total_reads_A / wt_reads_A),
+         ea_rep2 = log(total_reads_E2 / wt_reads_E2) - log(total_reads_A / wt_reads_A),
+         ea_rep3 = log(total_reads_E3 / wt_reads_E3) - log(total_reads_A / wt_reads_A),
+         cb_rep1 = log(total_reads_C1 / wt_reads_C1) - log(total_reads_B1 / wt_reads_B1),
+         cb_rep2 = log(total_reads_C2 / wt_reads_C2) - log(total_reads_B2 / wt_reads_B2),
+         cb_rep3 = log(total_reads_C3 / wt_reads_C3) - log(total_reads_B3 / wt_reads_B3),
+         db_rep1 = log(total_reads_D1 / wt_reads_D1) - log(total_reads_B1 / wt_reads_B1),
+         db_rep2 = log(total_reads_D2 / wt_reads_D2) - log(total_reads_B2 / wt_reads_B2),
+         db_rep3 = log(total_reads_D3 / wt_reads_D3) - log(total_reads_B3 / wt_reads_B3),
+         eb_rep1 = log(total_reads_E1 / wt_reads_E1) - log(total_reads_B1 / wt_reads_B1),
+         eb_rep2 = log(total_reads_E2 / wt_reads_E2) - log(total_reads_B2 / wt_reads_B2),
+         eb_rep3 = log(total_reads_E3 / wt_reads_E3) - log(total_reads_B3 / wt_reads_B3),
+         dc_rep1 = log(total_reads_D1 / wt_reads_D1) - log(total_reads_C1 / wt_reads_C1),
+         dc_rep2 = log(total_reads_D2 / wt_reads_D2) - log(total_reads_C2 / wt_reads_C2),
+         dc_rep3 = log(total_reads_D3 / wt_reads_D3) - log(total_reads_C3 / wt_reads_C3),
+         ec_rep1 = log(total_reads_E1 / wt_reads_E1) - log(total_reads_C1 / wt_reads_C1),
+         ec_rep2 = log(total_reads_E2 / wt_reads_E2) - log(total_reads_C2 / wt_reads_C2),
+         ec_rep3 = log(total_reads_E3 / wt_reads_E3) - log(total_reads_C3 / wt_reads_C3)) %>%
+  select(-contains("reads")) %>%
+  pivot_longer(cols = matches("([0-9])"),
+               names_to = "comparison",
+               values_to = "value")
+
+test2 <- test %>%
+  extract(col = comparison, 
+          into = c("samp_type", "replicate"),
+          regex = c("(.*)_rep([0-9])")) %>%
+  group_by(position, wt_aa, mut_aa, samp_type) %>%
+  summarise(nval = sum(!is.na(value)),
+            avgval = mean(value, na.rm = TRUE),
+            seval = sd(value, na.rm = TRUE) / nval) %>%
+  ungroup()
+
+test2 %>% filter(samp_type == "ec") %>% filter(position != 0) %>% complete(position = seq(1, nchar(wt_TFO), by = 1), mut_aa, samp_type, fill = list(NA)) %>% rename(log2val = avgval) %>% mutate(is_wt = case_when(wt_aa == mut_aa ~ "WT", TRUE ~ "notWT"), mut_aa = factor(mut_aa, levels = c("A", "V", "I", "L", "M", "F", "Y", "W", "S", "T", "N", "Q", "C", "G", "P", "R", "H", "K", "D", "E", "X", "del"))) %>% TFO_heatmap_plot() + scale_y_discrete(guide = guide_axis(n.dodge = 2), limits = rev) + scale_x_continuous(expand = c(0, 0), limits = c(0.5, 541.5), breaks = c(1, 100, 200, 300, 400, 500, 541)) + ggtitle("ec")
+
+write_csv(test2, "scored_variants_TFO.csv")
+
+## median and mean score by position
+TFO_median_by_position <- test2 %>%
+  mutate(type = case_when(mut_aa == "del" ~ "deletion",
+                          mut_aa == "X" ~ "nonsense",
+                          position == 0 ~ "WT",
+                          mut_aa == wt_aa ~ "synonymous",
+                          mut_aa != wt_aa ~ "missense")) %>%
+  ## remove WT and nonsense
+  filter(position > 0) %>%
+  ## calculate mean and median score at each position
+  group_by(position, samp_type, type) %>%
+  summarise(median_pos_score = median(avgval, na.rm = TRUE)) %>%
+  ungroup()
+
+TFO_median_all_vars <- test2 %>%
+  filter(position > 0) %>%
+  group_by(position, samp_type) %>%
+  summarise(median_pos_score = median(avgval, na.rm = TRUE),
+            type = "all") %>%
+  ungroup() %>%
+  rbind(TFO_median_by_position)
+
+write_csv(TFO_median_all_vars, "median_position.csv")
+
+## calculate windowed averages ## THINK ABOUT THIS
+TFO_roll_avg_by_position <- TFO_median_all_vars %>%
+  ## arrange by position and antibody
+  arrange(position) %>%
+  ## calculate rolling median and rolling average (n = 7)
+  group_by(samp_type, type) %>%
+  mutate(median7 = as.numeric(slide_index(.x = median_pos_score,
+                                          .i = position,
+                                          .f = ~median(.x, na.rm = TRUE),
+                                          .before = 3, .after = 3))) %>%
+  ungroup() %>%
+  ## remove duplicates
+  select(position, samp_type, median7, type) %>%
+  distinct()
+
+TFO_median_plot <- ggplot() +
+  geom_line(data = TFO_roll_avg_by_position,
+            aes(x = position,
+                y = median7,
+                color = type),
+            size = 1, alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", size = 1) +
+  scale_x_continuous(expand = c(0, 0),
+                     limits = c(0.5, 541.5),
+                     breaks = c(1, 100, 200, 300, 400, 500, 541)) +
+  # scale_y_continuous(expand = c(0, 0),
+  #                    limits = c(-0.05, 1.3),
+  #                    breaks = c(0, 0.25, 0.5, 0.75, 1, 1.25),
+  #                    labels = c("0", "0.25", "0.5", "0.75", "1", "1.25")) +
+  scale_color_manual(values = paletteer_d("PNWColors::Bay")) +
+  #scale_color_brewer(palette = "PuOr") +
+  labs(y = "windowed averaged\nmedian score",
+       x = "position",
+       color = "experiment comparison") +
+  facet_wrap(vars(samp_type)) #+
+  #theme_figure +
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+```
+
+```{r check variant correlation}
+
+## variant replication by tile
+variant_correlation <- scored_variants %>% 
+  ## join samples
+  left_join(scored_variants, by = c("tile", "wt_aa", "position", "mut_aa")) %>%
+  ## remove nonmatching antibodies  
+  filter(antibody.x == antibody.y) %>%
+  ## remove unneccessary column
+  select(-antibody.y) %>%
+  ## rename for ease
+  rename(antibody = antibody.x) %>%
+  ## filter only AB comparisons (discard BA)
+  filter(exp_replicate.x < exp_replicate.y) %>%
+  ## create easy label
+  mutate(label = paste0(antibody, " ", tile, ": rep", exp_replicate.x,
+                        " vs. rep", exp_replicate.y))
+
+## plot experimental replicate correlations for all variants in each sublibrary
+sublibrary_variant_correlations <- variant_correlation %>%
+  ## plot scores against one another
+  ggplot(aes(x = score.x,
+             y = score.y,
+             fill = antibody)) +
+  ## add points
+  geom_point(pch = 21, size = 1, alpha = 0.1) +
+  ## add correlation statistic
+  stat_cor(aes(label = paste(after_stat(r.label))), 
+               label.y = 1.9, label.x = 0, hjust = 0.5) +
+  ## plot perfect correlation line
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
+  ## make individual plot for each comparison
+  facet_wrap(facets = vars(label), nrow = 5) +
+  ## scale axes to fit data and include space
+  scale_x_continuous(expand = c(0, 0),
+                     limits = c(-0.55, 2.05),
+                     breaks = seq(-0.5, 2, by = 0.5),
+                     labels = c(-0.5, 0, 0.5, 1, 1.5, 2)) +
+  scale_y_continuous(expand = c(0, 0),
+                     limits = c(-0.55, 2.05),
+                     breaks = seq(-0.5, 2, by = 0.5),
+                     labels = c(-0.5, 0, 0.5, 1, 1.5, 2)) +
+  ## adjust fill colors
+  scale_fill_manual(values = paletteer_d("PNWColors::Bay")) +
+  ## labels
+  labs(x = "score in replicate A",
+       y = "score in replicate B") +
+  ## altering the background of the plot
+  theme(panel.spacing = unit(1, "lines"),
+        strip.background = element_blank()) +
+  ## darken points in legend
+  guides(fill = guide_legend(override.aes = list(alpha = 1)))
+
+```
+
+```{r average scores}
+
+## calculate the average score across each sublibrary and condition
+## do this because we will want to compare scores in adjacent sublibraries to 
+## adjust them as needed to be of similar distribution (I have not implemented
+## this function yet, as my data is quite comparable across sublibraries).
+## input file is scored_variants dataframe
+## output dataframe should have 8 columns
+   ## 1: antibody - antibody/condition (e.g. "001", "25 nM treatment")
+   ## 2: wt_aa - wildtype amino acid, one letter (e.g. L)
+      ## WT should be = NA
+   ## 3: position - numeric amino acid position in protein (e.g. 376)
+      ## WT should be = 0
+   ## 4: mut_aa - mutated amino acid, one letter (e.g. N)
+      ## WT should be = NA
+   ## 5: n_exp - number of experiments in which a variant was scored successfully
+   ## 6: average_sublibrary_score - average variant score (min-max normalized)
+   ## 7: se_score - standard error of variant score (min-max normalized)
+scored_variants_sublibrary_average <- scored_variants %>%
+  group_by(tile, antibody, wt_aa, position, mut_aa) %>%
+  ## calculate number of experiments (we often use this as a filter later)
+  summarise(n_exp = sum(!is.na(score)),
+            ## calculate the average of and standard error of each variant's scores
+            ## across all sublibraries and experimental replicates
+            average_sublibrary_score = mean(score, na.rm = TRUE),
+            se_score = sd(score, na.rm = TRUE) / sqrt(n_exp)) %>%
+  ungroup() %>%
+  ## retain only variants in overlaps between sublibraries
+  filter(position %in% overlap12 | position %in% overlap23)
+
+## calculate the average score across each condition
+## input file is scored_variants dataframe
+## output dataframe should have 8 columns
+   ## 1: antibody - antibody/condition (e.g. "001", "25 nM treatment")
+   ## 2: wt_aa - wildtype amino acid, one letter (e.g. L)
+      ## WT should be = NA
+   ## 3: position - numeric amino acid position in protein (e.g. 376)
+      ## WT should be = 0
+   ## 4: mut_aa - mutated amino acid, one letter (e.g. N)
+      ## WT should be = NA
+   ## 5: n_exp - number of experiments in which a variant was scored successfully
+   ## 6: average_score - average variant score (min-max normalized)
+   ## 7: se_score - standard error of variant score (min-max normalized)
+   ## 8: is_wt - column for identifying WT/synonymous variants (WT if true)
+scored_variants_average <- scored_variants %>%
+  group_by(antibody, wt_aa, position, mut_aa) %>%
+  ## calculate number of experiments (we often use this as a filter later)
+  summarise(n_exp = sum(!is.na(score)),
+            ## calculate the average of and standard error of each variant's scores
+            ## across all sublibraries and experimental replicates
+            average_score = mean(score, na.rm = TRUE),
+            se_score = sd(score, na.rm = TRUE) / sqrt(n_exp)) %>%
+  ungroup() %>%
+  ## adjust negative scores to be equal to 0, for easier plotting
+  mutate(average_score = case_when(average_score <= 0 ~ 0,
+                                   TRUE ~ average_score),
+         ## identify WT/synonymous residues for plotting later
+         is_wt = case_when(wt_aa == mut_aa ~ "WT",
+                           TRUE ~ "not WT"),
+         ## make mut_aa a factor so it plots in the order we want
+         mut_aa = factor(mut_aa, levels = c("A", "V", "I", "L", "M", "F", "Y",
+                                            "W", "S", "T", "N", "Q", "C", "G",
+                                            "P", "R", "H", "K", "D", "E", "X")))
+
+```
+
+```{r plot heatmap}
+
+## plot heatmap of data, one heatmap per condition
+## input file is scored_variants_average dataframe
+heatmap_full <- scored_variants_average %>%
+  ## remove nonsense (for my data only)
+  filter(mut_aa != "X") %>%
+  ## plot using custom heatmap_plot function
+  heatmap_plot(data = .) +
+  ## create individual plots for each condition, stacked vertically
+  facet_wrap(vars(antibody), ncol = 1,
+             ## labels for each condition, specify by user
+             labeller = as_labeller(c(`001` = "carboxylation-sensitive anti-Factor IX GLA",
+                                      `3570` = "anti-carboxylation",
+                                      `124` = "anti-Factor IX light chain",
+                                      `102` = "anti-Factor IX heavy chain",
+                                      `strep` = "anti-Strep II tag"))) +
+  ## scale x axis to have nice breaks
+  scale_x_continuous(expand = c(0, 0),
+                     limits = c(0.5, 461.5),
+                     breaks = c(1, 50, 100, 150, 200, 250, 300, 350, 400, 450, 461)) +
+  ## adjust y axis labels to make better use of vertical space
+  scale_y_discrete(guide = guide_axis(n.dodge = 2),
+                   ## some reason they need to be plotted in reverse? unclear why
+                   limits = rev) +
+  ## adjust background of plot
+  theme(strip.background = element_blank(),
+        strip.text = element_text(size = 30, color = "black"))
+
+```

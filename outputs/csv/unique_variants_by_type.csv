@@ -1,0 +1,5 @@
+mut_type,n_variants_present,aa_length,n_possible_variants,frac_variants_present
+deletion,499,540,540,0.924
+nonsense,530,540,540,0.981
+synonymous,496,540,540,0.919
+missense,9904,540,10260,0.965
