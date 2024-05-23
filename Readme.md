@@ -1,5 +1,8 @@
 # Analysis and figures for Hull, et al., Deep Mutational Scan of a DNA Polymerase via Compartmentalized Self-Replication
 
+[![DOI](https://zenodo.org/badge/798443598.svg)](https://zenodo.org/doi/10.5281/zenodo.11268365)
+
+
 Requirements:
 R 4.0.0 or greater
 
